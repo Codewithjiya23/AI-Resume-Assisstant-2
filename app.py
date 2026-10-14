@@ -23,7 +23,7 @@ from pydantic import BaseModel
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_MODEL = "flash latest"
 # Tried in order if the configured model returns "not found" (Google retires models often).
 FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
 MAX_FILE_MB = 5
