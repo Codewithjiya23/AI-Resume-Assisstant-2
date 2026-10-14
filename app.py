@@ -23,7 +23,9 @@ from pydantic import BaseModel
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
+# Tried in order if the configured model returns "not found" (Google retires models often).
+FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]
 MAX_FILE_MB = 5
 MAX_RESUME_CHARS = 25_000   # keeps prompts small and fast
 MAX_JD_CHARS = 8_000
@@ -284,22 +286,41 @@ def parse_analysis(response) -> Analysis:
     return Analysis.model_validate(json.loads(raw))
 
 
+def is_model_not_found(exc: Exception) -> bool:
+    low = str(exc).lower()
+    return "404" in low or "not_found" in low or "not found" in low
+
+
 def analyze_resume(api_key: str, model: str, resume_text: str, job_description: str) -> Analysis:
+    """Call Gemini; if the model name is retired/unknown, try the fallback models."""
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=build_user_prompt(resume_text, job_description),
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.2,
-            response_mime_type="application/json",
-            response_schema=Analysis,
-        ),
+    # NOTE: temperature is left at its default on purpose; Google recommends the
+    # default for Gemini 3 models (lower values can degrade output).
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        response_mime_type="application/json",
+        response_schema=Analysis,
     )
-    return parse_analysis(response)
+    contents = build_user_prompt(resume_text, job_description)
+
+    candidates = []
+    for name in [model, DEFAULT_MODEL, *FALLBACK_MODELS]:
+        if name not in candidates:
+            candidates.append(name)
+    last_exc: Exception | None = None
+    for name in candidates:
+        try:
+            response = client.models.generate_content(model=name, contents=contents, config=config)
+            return parse_analysis(response)
+        except Exception as exc:
+            if is_model_not_found(exc):
+                last_exc = exc
+                continue
+            raise
+    raise last_exc  # every candidate was "not found"
 
 
 def friendly_error(exc: Exception) -> str:
@@ -310,7 +331,8 @@ def friendly_error(exc: Exception) -> str:
     if "429" in low or "quota" in low or "resource_exhausted" in low or "rate limit" in low:
         return "Gemini rate limit or quota reached. Wait a minute and try again."
     if "404" in low or "not found" in low:
-        return f"The model name was not found. Set GEMINI_MODEL to a valid model (default: {DEFAULT_MODEL})."
+        return ("No Gemini model was found. Google retires models regularly: set GEMINI_MODEL to a current "
+                f"Flash model from ai.google.dev/gemini-api/docs/models (default: {DEFAULT_MODEL}).")
     if isinstance(exc, (json.JSONDecodeError, ValueError)):
         return f"The AI response could not be parsed. Please click Analyze again. ({type(exc).__name__})"
     return f"Something went wrong while contacting Gemini: {msg[:300]}"
